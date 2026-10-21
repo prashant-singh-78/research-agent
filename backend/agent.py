@@ -9,55 +9,127 @@ from tools import search_web, search_arxiv
 
 logger = logging.getLogger("research_agent")
 
-OLLAMA_CHAT_URL = os.environ.get("OLLAMA_CHAT_URL", "http://127.0.0.1:11434/api/chat")
-DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
+DEFAULT_GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+DEFAULT_MODEL = DEFAULT_GEMINI_MODEL
+OLLAMA_CHAT_URL = GEMINI_API_BASE_URL
 
 
-class OllamaServiceError(Exception):
-    """Raised when Ollama API returns an error or is unreachable."""
+def _load_env_file():
+    """
+    Lightweight .env loader using standard library to support local configuration
+    without adding extra dependencies.
+    """
+    candidates = [
+        os.path.join(os.getcwd(), ".env"),
+        os.path.join(os.path.dirname(__file__), ".env"),
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+    ]
+    for env_path in candidates:
+        if os.path.isfile(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip("'\"")
+                            if k and k not in os.environ:
+                                os.environ[k] = v
+                break
+            except Exception:
+                pass
+
+
+_load_env_file()
+
+
+class AIServiceError(Exception):
+    """Raised when the AI provider API returns an error or is unreachable."""
     pass
+
+
+# Backward compatibility alias for any existing imports
+OllamaServiceError = AIServiceError
 
 
 class ResearchAgent:
     def __init__(
         self,
-        ollama_url: str = OLLAMA_CHAT_URL,
-        model: str = DEFAULT_MODEL,
-        timeout: int = 120
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: int = 60
     ):
-        self.ollama_url = ollama_url
-        self.model = model
+        self.api_key = (api_key or os.environ.get("GEMINI_API_KEY", "")).strip()
+        self.model = (model or os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)).strip()
         self.timeout = timeout
+        self.api_base_url = GEMINI_API_BASE_URL
 
-    def check_ollama_status(self) -> Dict[str, Any]:
+    def check_gemini_status(self) -> Dict[str, Any]:
         """
-        Verify if Ollama server is running and the specified model is present.
+        Verify Gemini API configuration and network connectivity.
+        Never logs or exposes the raw API key.
         """
-        tags_url = self.ollama_url.replace("/api/chat", "/api/tags")
+        # Re-check environment in case key or model was populated dynamically
+        if not self.api_key:
+            self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        env_model = os.environ.get("GEMINI_MODEL", "").strip()
+        if env_model:
+            self.model = env_model
+
+        if not self.api_key:
+            return {
+                "provider": "gemini",
+                "configured": False,
+                "reachable": False,
+                "model": self.model,
+                "error": "GEMINI_API_KEY environment variable is not configured."
+            }
+
+        url = f"{self.api_base_url}/models/{self.model}"
+        headers = {
+            "x-goog-api-key": self.api_key
+        }
+
         try:
-            resp = requests.get(tags_url, timeout=5)
+            resp = requests.get(url, headers=headers, timeout=6)
             if resp.status_code == 200:
                 data = resp.json()
-                models = [m.get("name") for m in data.get("models", [])]
-                model_exists = any(
-                    self.model in m or m.startswith(self.model) for m in models
-                )
                 return {
+                    "provider": "gemini",
+                    "configured": True,
                     "reachable": True,
-                    "model_available": model_exists,
-                    "available_models": models
+                    "model": data.get("name", self.model).replace("models/", ""),
+                    "display_name": data.get("displayName", self.model)
                 }
-            return {
-                "reachable": False,
-                "model_available": False,
-                "error": f"Ollama returned HTTP {resp.status_code}"
-            }
+            elif resp.status_code in (401, 403):
+                return {
+                    "provider": "gemini",
+                    "configured": True,
+                    "reachable": False,
+                    "model": self.model,
+                    "error": "Invalid or unauthorized GEMINI_API_KEY."
+                }
+            else:
+                return {
+                    "provider": "gemini",
+                    "configured": True,
+                    "reachable": False,
+                    "model": self.model,
+                    "error": f"Gemini API returned HTTP {resp.status_code}"
+                }
         except requests.exceptions.RequestException as e:
             return {
+                "provider": "gemini",
+                "configured": True,
                 "reachable": False,
-                "model_available": False,
-                "error": f"Cannot connect to Ollama at {tags_url}. Ensure Ollama is running. ({e})"
+                "model": self.model,
+                "error": f"Cannot connect to Gemini API endpoint ({str(e)})"
             }
+
+    # Backward compatibility alias
+    check_ollama_status = check_gemini_status
 
     @staticmethod
     def classify_intent(query: str, history: Optional[List[Dict[str, str]]] = None) -> tuple:
@@ -106,51 +178,149 @@ class ResearchAgent:
         # 5. Default Conversational Chat (General knowledge, explanations, definitions, coding, brainstorming)
         return "chat", "general_knowledge"
 
-    def _call_ollama(
+    def _convert_to_gemini_payload(
+        self,
+        messages: List[Dict[str, str]],
+        depth: str = "concise",
+        is_chat: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Converts standard [{"role": "...", "content": "..."}] messages to Gemini REST API format:
+        - Separates system messages into systemInstruction.
+        - Maps 'assistant' role to 'model'.
+        - Merges consecutive turns of identical roles.
+        - Configures generationConfig tokens and temperature.
+        """
+        system_texts: List[str] = []
+        contents: List[Dict[str, Any]] = []
+
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+
+            if role == "system":
+                system_texts.append(content)
+            else:
+                gemini_role = "model" if role == "assistant" else "user"
+                # Merge consecutive identical roles
+                if contents and contents[-1]["role"] == gemini_role:
+                    contents[-1]["parts"][0]["text"] += f"\n\n{content}"
+                else:
+                    contents.append({
+                        "role": gemini_role,
+                        "parts": [{"text": content}]
+                    })
+
+        # Ensure contents is never empty and begins with a user turn
+        if not contents:
+            contents.append({
+                "role": "user",
+                "parts": [{"text": "Hello"}]
+            })
+        elif contents[0]["role"] == "model":
+            contents.insert(0, {
+                "role": "user",
+                "parts": [{"text": "Hello PALLU"}]
+            })
+
+        max_tokens = 1500 if is_chat else (1600 if depth == "concise" else 2500)
+        payload: Dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.4 if is_chat else 0.3,
+                "maxOutputTokens": max_tokens,
+                "topP": 0.95
+            }
+        }
+
+        if system_texts:
+            payload["systemInstruction"] = {
+                "parts": [{"text": "\n\n".join(system_texts)}]
+            }
+
+        return payload
+
+    def _call_gemini(
         self,
         messages: List[Dict[str, str]],
         depth: str = "concise",
         is_chat: bool = False
     ) -> str:
         """
-        Calls Ollama chat endpoint with generation constraints.
-        Provides ample token budget for reasoning and synthesis, separating internal thinking cleanly.
+        Calls Gemini generateContent REST API using requests.
+        Ensures secure header authentication and safe response parsing.
         """
-        max_tokens = 1500 if is_chat else (1600 if depth == "concise" else 2200)
+        if not self.api_key:
+            self.api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        env_model = os.environ.get("GEMINI_MODEL", "").strip()
+        if env_model:
+            self.model = env_model
 
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": 0.4 if is_chat else 0.3,
-                "num_predict": max_tokens,
-                "top_p": 0.9,
-                "repeat_penalty": 1.1
-            }
+        if not self.api_key:
+            raise AIServiceError(
+                "GEMINI_API_KEY environment variable is not configured. "
+                "Please set GEMINI_API_KEY in your environment or Render settings."
+            )
+
+        url = f"{self.api_base_url}/models/{self.model}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key
         }
+
+        payload = self._convert_to_gemini_payload(messages, depth=depth, is_chat=is_chat)
 
         try:
             resp = requests.post(
-                self.ollama_url,
+                url,
+                headers=headers,
                 json=payload,
                 timeout=self.timeout
             )
+
             if resp.status_code != 200:
-                raise OllamaServiceError(
-                    f"Ollama returned HTTP {resp.status_code}: {resp.text}"
-                )
+                error_msg = f"HTTP {resp.status_code}"
+                try:
+                    err_json = resp.json()
+                    err_detail = err_json.get("error", {}).get("message")
+                    if err_detail:
+                        error_msg = f"{error_msg}: {err_detail}"
+                except Exception:
+                    error_msg = f"{error_msg}: {resp.text[:200]}"
+
+                if resp.status_code in (401, 403):
+                    raise AIServiceError(
+                        f"Gemini API authentication failed ({error_msg}). "
+                        "Please verify that your GEMINI_API_KEY is valid."
+                    )
+                elif resp.status_code == 429:
+                    raise AIServiceError(
+                        f"Gemini API quota/rate limit exceeded ({error_msg}). "
+                        "Please try again in a few moments."
+                    )
+                else:
+                    raise AIServiceError(f"Gemini API request failed: {error_msg}")
+
             data = resp.json()
-            message = data.get("message", {})
-            content = message.get("content", "").strip()
-            thinking = message.get("thinking", "").strip()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                prompt_feedback = data.get("promptFeedback", {})
+                block_reason = prompt_feedback.get("blockReason")
+                if block_reason:
+                    raise AIServiceError(f"Gemini response was blocked by safety filters: {block_reason}")
+                raise AIServiceError("Gemini returned no response candidates.")
 
-            # Clean any residual <think> tags if present in content
-            cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            candidate = candidates[0]
+            parts = candidate.get("content", {}).get("parts", [])
+            if not parts:
+                finish_reason = candidate.get("finishReason", "UNKNOWN")
+                raise AIServiceError(f"Gemini returned empty content (finishReason: {finish_reason}).")
 
-            # Fallback if content was empty but thinking was captured
-            if not cleaned_content and thinking:
-                cleaned_content = thinking
+            content = "".join(p.get("text", "") for p in parts if isinstance(p, dict)).strip()
+            if not content:
+                raise AIServiceError("Gemini generated an empty text response.")
 
             # For research synthesis, cleanly trim any meta-planning markers before the first section
             if not is_chat:
@@ -163,25 +333,29 @@ class ResearchAgent:
                     "**Overview", 
                     "Overview (Mukhyamsh)"
                 ]:
-                    if header_marker in cleaned_content:
-                        marker_pos = cleaned_content.find(header_marker)
+                    if header_marker in content:
+                        marker_pos = content.find(header_marker)
                         if marker_pos > 0:
-                            cleaned_content = cleaned_content[marker_pos:].strip()
+                            content = content[marker_pos:].strip()
                             break
 
-            return cleaned_content or content
+            return content
 
-        except requests.exceptions.ConnectionError as e:
-            raise OllamaServiceError(
-                "Could not connect to Ollama. Make sure Ollama is running locally on port 11434."
-            ) from e
         except requests.exceptions.Timeout as e:
-            raise OllamaServiceError(
-                f"Ollama local inference timed out after {self.timeout}s. "
-                "Recommendation: Select 'Concise Report' mode or reduce max sources for faster local inference."
+            raise AIServiceError(
+                f"Gemini API request timed out after {self.timeout}s. Please try again."
             ) from e
+        except requests.exceptions.ConnectionError as e:
+            raise AIServiceError(
+                "Could not connect to Gemini API. Please check your internet connection."
+            ) from e
+        except AIServiceError:
+            raise
         except Exception as e:
-            raise OllamaServiceError(f"Unexpected error communicating with Ollama: {str(e)}") from e
+            raise AIServiceError(f"Unexpected error communicating with Gemini API: {str(e)}") from e
+
+    # Backward compatibility alias
+    _call_ollama = _call_gemini
 
     def chat(
         self,
@@ -192,7 +366,7 @@ class ResearchAgent:
         intent: str = "general_knowledge"
     ) -> Dict[str, Any]:
         """
-        Executes a direct conversational response without web or arXiv searches.
+        Executes a direct conversational response using Gemini without web or arXiv searches.
         Maintains conversation context from conversation_history.
         """
         start_time = time.time()
@@ -204,10 +378,10 @@ class ResearchAgent:
             "(Hindi written in Latin alphabet with standard technical English terms), "
             "or standard English if the user writes in pure English.\n\n"
             "STRICT RULES:\n"
-            "1. CONVERSATIONAL & ENGAGING: Like ChatGPT, answer directly with a warm, helpful persona.\n"
+            "1. CONVERSATIONAL & ENGAGING: Answer directly with a warm, helpful persona.\n"
             "2. GREETINGS: For greetings like 'Hi PALLU', give a friendly, warm welcome and ask how you can help.\n"
             "3. EXPLANATIONS & KNOWLEDGE: For questions like 'What is a human?' or 'Explain machine learning with an example', "
-            "provide crystal-clear, structured answers with helpful analogies and examples.\n"
+            "provide crystal-clear, structured answers with helpful analogies and real-world examples.\n"
             "4. FOLLOW-UP CONTINUITY: When user asks follow-ups (e.g. 'Tell me more about that'), seamlessly maintain context "
             "and expand on the previous discussion without restarting.\n"
             "5. NO FAKE CITATIONS: Since this is direct conversational chat (no external search was performed), "
@@ -231,7 +405,7 @@ class ResearchAgent:
         messages.append({"role": "user", "content": clean_query})
 
         gen_start = time.time()
-        response_text = self._call_ollama(messages, depth=depth, is_chat=True)
+        response_text = self._call_gemini(messages, depth=depth, is_chat=True)
         gen_duration = round(time.time() - gen_start, 2)
         total_duration = round(time.time() - start_time, 2)
 
@@ -247,7 +421,8 @@ class ResearchAgent:
             },
             "metadata": {
                 "model": self.model,
-                "ollama_endpoint": self.ollama_url,
+                "ai_provider": "gemini",
+                "ollama_endpoint": "https://generativelanguage.googleapis.com",
                 "execution_time_seconds": total_duration,
                 "search_time_seconds": 0.0,
                 "generation_time_seconds": gen_duration,
@@ -269,11 +444,11 @@ class ResearchAgent:
         conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> Dict[str, Any]:
         """
-        Intelligent research router and grounded synthesis:
+        Intelligent research router and grounded synthesis powered by Gemini:
         1. Classifies request intent before executing tools.
         2. Routes between Normal Chat (no tools), Web Search (DuckDuckGo), and Deep Research (Web + arXiv).
         3. Honors explicit user-selected modes.
-        4. Distinguishes preprints from peer-reviewed research and never hallucinates sources.
+        4. Distinguishes preprints from peer-reviewed research and strictly prevents hallucination.
         """
         start_time = time.time()
         clean_query = query.strip()
@@ -283,7 +458,6 @@ class ResearchAgent:
         detected_mode, detected_intent = self.classify_intent(clean_query, conversation_history)
 
         # Step 2: Determine Effective Mode
-        # Explicit user-selected modes take priority
         if user_mode == "web":
             effective_mode = "web"
             intent = "explicit_web_search"
@@ -291,7 +465,6 @@ class ResearchAgent:
             effective_mode = "deep"
             intent = "explicit_academic_research"
         elif user_mode == "chat":
-            # Normal Chat default: auto-escalate ONLY when query explicitly demands live web or deep papers
             if detected_mode in ("web", "deep"):
                 effective_mode = detected_mode
                 intent = detected_intent
@@ -306,7 +479,7 @@ class ResearchAgent:
             f"Routing: '{clean_query}' -> user_mode='{user_mode}', effective_mode='{effective_mode}', intent='{intent}'"
         )
 
-        # If routed to chat: answer directly via local Ollama without web or arXiv search
+        # If routed to chat: answer directly via Gemini without web or arXiv search
         if effective_mode == "chat":
             return self.chat(
                 query=clean_query,
@@ -345,7 +518,7 @@ class ResearchAgent:
 
         search_duration = round(time.time() - search_start, 2)
 
-        # Step 4: Format Context for the LLM
+        # Step 4: Format Context for Gemini
         context_parts: List[str] = []
 
         if web_results:
@@ -427,7 +600,6 @@ class ResearchAgent:
             {"role": "system", "content": system_prompt}
         ]
 
-        # Include prior context if follow-up
         if conversation_history:
             for prev in conversation_history[-3:]:
                 if prev.get("role") in ("user", "assistant"):
@@ -435,9 +607,9 @@ class ResearchAgent:
 
         messages.append({"role": "user", "content": user_prompt})
 
-        # Step 6: Synthesize with qwen3:4b
+        # Step 6: Synthesize with Gemini
         gen_start = time.time()
-        report = self._call_ollama(messages, depth=depth, is_chat=False)
+        report = self._call_gemini(messages, depth=depth, is_chat=False)
         gen_duration = round(time.time() - gen_start, 2)
         total_duration = round(time.time() - start_time, 2)
 
@@ -453,7 +625,8 @@ class ResearchAgent:
             },
             "metadata": {
                 "model": self.model,
-                "ollama_endpoint": self.ollama_url,
+                "ai_provider": "gemini",
+                "ollama_endpoint": "https://generativelanguage.googleapis.com",
                 "execution_time_seconds": total_duration,
                 "search_time_seconds": search_duration,
                 "generation_time_seconds": gen_duration,

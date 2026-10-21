@@ -5,7 +5,13 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from agent import ResearchAgent, OllamaServiceError, OLLAMA_CHAT_URL, DEFAULT_MODEL
+from agent import (
+    ResearchAgent,
+    AIServiceError,
+    OllamaServiceError,
+    DEFAULT_GEMINI_MODEL,
+    GEMINI_API_BASE_URL
+)
 
 # Configure logging
 logging.basicConfig(
@@ -16,7 +22,7 @@ logger = logging.getLogger("api")
 
 app = FastAPI(
     title="PALLU - Personal AI Research Assistant API",
-    description="Personal AI Research Assistant (PALLU) powered by local Ollama (qwen3:4b), DuckDuckGo, and ArXiv.",
+    description="Personal AI Research Assistant (PALLU) powered by Google Gemini, DuckDuckGo, and ArXiv.",
     version="1.0.0"
 )
 
@@ -50,8 +56,6 @@ app.add_middleware(
 
 # Initialize Agent instance
 agent = ResearchAgent(
-    ollama_url=OLLAMA_CHAT_URL,
-    model=DEFAULT_MODEL,
     timeout=180
 )
 
@@ -114,7 +118,8 @@ class SourcesGroup(BaseModel):
 
 class ResearchMetadata(BaseModel):
     model: str
-    ollama_endpoint: str
+    ai_provider: Optional[str] = "gemini"
+    ollama_endpoint: Optional[str] = "https://generativelanguage.googleapis.com"
     execution_time_seconds: float
     search_time_seconds: Optional[float] = None
     generation_time_seconds: Optional[float] = None
@@ -143,14 +148,15 @@ def root():
         "tagline": "Your Personal AI Research Assistant",
         "version": "1.0.0",
         "status": "online",
-        "description": "PALLU: Your Personal AI Research Assistant powered by local Ollama (qwen3:4b), DuckDuckGo, and ArXiv.",
+        "provider": "gemini",
+        "description": "PALLU: Your Personal AI Research Assistant powered by Google Gemini, DuckDuckGo, and ArXiv.",
         "endpoints": {
             "GET /": "API overview",
-            "GET /health": "Health check for server and Ollama model status",
+            "GET /health": "Health check for server and Gemini model status",
             "POST /research": "Perform deep research on a topic",
             "GET /docs": "Interactive Swagger UI documentation"
         },
-        "default_model": DEFAULT_MODEL,
+        "default_model": agent.model,
         "default_language": "Hinglish (Simple Hindi + English)"
     }
 
@@ -158,25 +164,34 @@ def root():
 @app.get("/health", tags=["System"])
 def health_check():
     """
-    Health check endpoint: verifies backend status and Ollama availability.
+    Health check endpoint: verifies backend status and Gemini API availability.
     """
-    ollama_status = agent.check_ollama_status()
-    is_healthy = ollama_status.get("reachable", False) and ollama_status.get("model_available", False)
+    gemini_status = agent.check_gemini_status()
+    is_healthy = gemini_status.get("configured", False) and gemini_status.get("reachable", False)
 
     response_payload = {
         "status": "healthy" if is_healthy else "degraded",
         "backend": "ok",
+        "provider": "gemini",
+        "gemini": {
+            "configured": gemini_status.get("configured", False),
+            "reachable": gemini_status.get("reachable", False),
+            "model": gemini_status.get("model", agent.model),
+            "display_name": gemini_status.get("display_name", agent.model),
+            "error": gemini_status.get("error")
+        },
+        # Backward compatibility object so existing frontend monitors function seamlessly
         "ollama": {
-            "endpoint": agent.ollama_url,
-            "reachable": ollama_status.get("reachable", False),
-            "target_model": agent.model,
-            "target_model_installed": ollama_status.get("model_available", False),
-            "all_available_models": ollama_status.get("available_models", [])
+            "endpoint": "https://generativelanguage.googleapis.com",
+            "reachable": is_healthy,
+            "target_model": gemini_status.get("model", agent.model),
+            "target_model_installed": is_healthy,
+            "all_available_models": [gemini_status.get("model", agent.model)]
         }
     }
 
-    if not ollama_status.get("reachable", False):
-        response_payload["error"] = ollama_status.get("error", "Ollama is not reachable.")
+    if not is_healthy:
+        response_payload["error"] = gemini_status.get("error", "Gemini service is not available.")
 
     return response_payload
 
@@ -187,7 +202,7 @@ def conduct_research(request: ResearchRequest):
     Deep research endpoint:
     - Gathers verified live web data from DuckDuckGo.
     - Fetches relevant scientific papers from ArXiv.
-    - Synthesizes findings using local qwen3:4b model in clear Hinglish.
+    - Synthesizes findings using Google Gemini in clear Hinglish.
     - Strictly prevents hallucination of sources and returns verified citations.
     """
     try:
@@ -206,11 +221,11 @@ def conduct_research(request: ResearchRequest):
         )
         return result
 
-    except OllamaServiceError as ose:
-        logger.error(f"Ollama Service Error: {ose}")
+    except AIServiceError as ase:
+        logger.error(f"AI Service Error: {ase}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Ollama AI Service Error: {str(ose)}"
+            detail=f"AI Service Error: {str(ase)}"
         )
     except Exception as e:
         logger.error(f"Internal error during research processing: {e}", exc_info=True)
