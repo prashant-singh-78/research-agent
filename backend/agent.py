@@ -1,3 +1,4 @@
+import os
 import time
 import re
 import logging
@@ -8,8 +9,8 @@ from tools import search_web, search_arxiv
 
 logger = logging.getLogger("research_agent")
 
-OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
-DEFAULT_MODEL = "qwen3:4b"
+OLLAMA_CHAT_URL = os.environ.get("OLLAMA_CHAT_URL", "http://127.0.0.1:11434/api/chat")
+DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:4b")
 
 
 class OllamaServiceError(Exception):
