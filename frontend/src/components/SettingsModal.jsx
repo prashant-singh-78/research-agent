@@ -69,7 +69,7 @@ export function SettingsModal({ isOpen, onClose, onRefreshHealth, backendHealth 
                 type="text"
                 value={urlInput}
                 onChange={(e) => setUrlInput(e.target.value)}
-                placeholder="http://127.0.0.1:8000"
+                placeholder={DEFAULT_BACKEND_URL}
                 className="neon-url-input"
               />
               <button type="submit" className="neon-url-save-btn">

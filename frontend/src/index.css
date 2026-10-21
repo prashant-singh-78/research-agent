@@ -447,6 +447,11 @@ body {
   box-shadow: 0 0 8px rgba(16, 185, 129, 0.8);
 }
 
+.pulse-amber {
+  background-color: var(--amber-accent);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.8);
+}
+
 .pulse-red {
   background-color: var(--red-accent);
   box-shadow: 0 0 8px rgba(239, 68, 68, 0.8);
@@ -651,6 +656,11 @@ body {
 .telemetry-dot.live {
   background: var(--emerald-accent);
   box-shadow: 0 0 6px var(--emerald-accent);
+}
+
+.telemetry-dot.degraded {
+  background: var(--amber-accent);
+  box-shadow: 0 0 6px var(--amber-accent);
 }
 
 .telemetry-dot.dead {

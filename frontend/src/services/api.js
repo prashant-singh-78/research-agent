@@ -1,16 +1,34 @@
 /**
  * API Service for AI Research Agent
- * Connects to FastAPI backend at http://127.0.0.1:8000
+ * Configured via Vite environment variable VITE_API_URL, with fallback to deployed/local endpoints.
  */
 
-export const DEFAULT_BACKEND_URL = "http://127.0.0.1:8000";
+const envApiUrl = typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL 
+  ? import.meta.env.VITE_API_URL.trim().replace(/\/+$/, "") 
+  : "";
+
+export const DEFAULT_BACKEND_URL = envApiUrl || (
+  typeof window !== "undefined" && window.location.protocol === "https:"
+    ? "https://research-agent-fv0t.onrender.com"
+    : "http://127.0.0.1:8000"
+);
 
 export function getBackendUrl() {
-  return localStorage.getItem("research_agent_backend_url") || DEFAULT_BACKEND_URL;
+  const customUrl = localStorage.getItem("research_agent_backend_url");
+  if (customUrl) {
+    // If the frontend is served over HTTPS but localStorage has an old insecure http:// URL (e.g. localhost),
+    // clear it and use DEFAULT_BACKEND_URL to prevent browser Mixed Content errors.
+    if (typeof window !== "undefined" && window.location.protocol === "https:" && customUrl.startsWith("http://")) {
+      localStorage.removeItem("research_agent_backend_url");
+      return DEFAULT_BACKEND_URL;
+    }
+    return customUrl.trim().replace(/\/+$/, "");
+  }
+  return DEFAULT_BACKEND_URL;
 }
 
 export function setBackendUrl(url) {
-  if (!url) {
+  if (!url || url.trim() === DEFAULT_BACKEND_URL) {
     localStorage.removeItem("research_agent_backend_url");
   } else {
     localStorage.setItem("research_agent_backend_url", url.trim().replace(/\/+$/, ""));

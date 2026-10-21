@@ -24,6 +24,7 @@ export function Header({
   backendHealth
 }) {
   const isHealthy = backendHealth?.online && backendHealth?.status === "healthy";
+  const isDegraded = backendHealth?.online && backendHealth?.status === "degraded";
 
   return (
     <header className="futuristic-header">
@@ -68,11 +69,17 @@ export function Header({
         <div 
           className="header-telemetry-pill"
           onClick={onOpenSettings}
-          title={isHealthy ? "Ollama Online (RTX 3050)" : "API Disconnected"}
+          title={
+            isHealthy 
+              ? "Ollama Online (qwen3:4b)" 
+              : (isDegraded ? "Backend Connected • Ollama Disconnected" : "API Disconnected")
+          }
         >
-          <span className={`telemetry-dot ${isHealthy ? "live" : "dead"}`} />
+          <span className={`telemetry-dot ${isHealthy ? "live" : (isDegraded ? "degraded" : "dead")}`} />
           <span className="telemetry-label telemetry-label-desktop">
-            {isHealthy ? "Ollama Online (RTX 3050)" : "API Disconnected"}
+            {isHealthy 
+              ? "Ollama Online (qwen3:4b)" 
+              : (isDegraded ? "Backend OK • Ollama Disconnected" : "API Disconnected")}
           </span>
         </div>
 

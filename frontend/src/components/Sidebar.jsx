@@ -14,6 +14,8 @@ import {
   BookOpen
 } from "lucide-react";
 
+import { getBackendUrl } from "../services/api";
+
 export function Sidebar({
   isOpen,
   onClose,
@@ -26,7 +28,9 @@ export function Sidebar({
   backendHealth
 }) {
   const isHealthy = backendHealth?.online && backendHealth?.status === "healthy";
+  const isDegraded = backendHealth?.online && backendHealth?.status === "degraded";
   const ollama = backendHealth?.ollama || {};
+  const currentEndpoint = getBackendUrl();
 
   return (
     <>
@@ -145,14 +149,16 @@ export function Sidebar({
             title="Click for full diagnostics"
           >
             <div className="telemetry-dot-wrap">
-              <span className={`pulse-dot ${isHealthy ? "pulse-green" : "pulse-red"}`} />
+              <span className={`pulse-dot ${isHealthy ? "pulse-green" : (isDegraded ? "pulse-amber" : "pulse-red")}`} />
             </div>
             <div className="telemetry-text-wrap">
               <span className="telemetry-status-head">
-                {isHealthy ? "RTX 3050 • qwen3:4b" : "Ollama Offline"}
+                {isHealthy 
+                  ? "RTX 3050 • qwen3:4b" 
+                  : (isDegraded ? "Backend OK • Ollama Offline" : "API Offline")}
               </span>
-              <span className="telemetry-endpoint-sub">
-                http://127.0.0.1:8000
+              <span className="telemetry-endpoint-sub" title={currentEndpoint}>
+                {currentEndpoint.replace(/^https?:\/\//, "")}
               </span>
             </div>
             <Activity size={14} className="text-cyan-400" />

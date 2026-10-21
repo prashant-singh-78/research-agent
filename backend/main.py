@@ -1,3 +1,4 @@
+import os
 import logging
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException, status
@@ -19,18 +20,29 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS for frontend integration (strictly local development origins)
+# Enable CORS for local development and deployed frontend origins
+cors_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+    "https://research-agent-1-m8p4.onrender.com",
+]
+
+# Allow additional custom origins via environment variable
+extra_origins = os.environ.get("ALLOWED_ORIGINS", "")
+if extra_origins:
+    for o in extra_origins.split(","):
+        clean_o = o.strip()
+        if clean_o and clean_o not in cors_origins:
+            cors_origins.append(clean_o)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
-    ],
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origins=cors_origins,
+    allow_origin_regex=r"^(http://(localhost|127\.0\.0\.1)(:\d+)?|https://.*\.onrender\.com)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
