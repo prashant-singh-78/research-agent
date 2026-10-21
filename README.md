@@ -36,17 +36,9 @@ The vision is simple: **make research feel less complicated and knowledge more a
 
 Add your actual application screenshots to the `screenshots/` directory.
 
-### 🏠 Application Interface
 
-![PALLU Application Interface](screenshots/home.png)
 
-### 💬 AI Chat
 
-![PALLU Chat Interface](screenshots/chat.png)
-
-### ⚙️ System Diagnostics
-
-![PALLU System Diagnostics](screenshots/settings.png)
 
 > Replace the image paths above with your actual screenshot filenames if they differ.
 
