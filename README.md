@@ -28,23 +28,8 @@ The project combines a React frontend with a Python FastAPI backend and Google's
 - **Backend API:** https://research-agent-fv0t.onrender.com
 - **Health Check:** https://research-agent-fv0t.onrender.com/health
 
-## Screenshots
 
-### Home Page
 
-![PALLU Home Page](screenshots/home.png)
-
-### Chat Interface
-
-![PALLU Chat Interface](screenshots/chat.png)
-
-### Settings & Diagnostics
-
-![PALLU Settings](screenshots/settings.png)
-
-*Make sure the screenshots are uploaded to the `screenshots` folder in the repository.*
-
-## Getting Started
 
 ### 1. Clone the repository
 
